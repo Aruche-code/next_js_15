@@ -1,15 +1,18 @@
 'use client';
 
 import { useHover } from '@/app/fooks/useHover';
-import { createClassNames } from '@/app/utils/createClassNames';
-import styles from './index.module.scss';
+import React from 'react';
 
-const HoverWrapper = () => {
+type Props = {
+    children: React.ReactNode;
+}
+
+const HoverWrapper = ({ children }: Props) => {
     const { isHovered, eventHandlers } = useHover();
 
     return (
-        <div className={createClassNames(styles.hoverWrapper, (isHovered ? styles.hovered : ''))} {...eventHandlers}>
-            {isHovered ? 'ホバー中です！' : 'ホバーしてみてください'}
+        <div {...eventHandlers}>
+            {isHovered && children}
         </div>
     );
 };

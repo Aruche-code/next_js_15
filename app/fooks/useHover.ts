@@ -1,10 +1,24 @@
 import { useCallback, useState } from 'react';
 
-export const useHover = () => {
-    const [isHovered, setIsHovered] = useState(false);
+type EventHandlers = {
+    onMouseEnter: () => void;
+    onMouseLeave: () => void;
+}
+type UseHover = {
+    isHovered: boolean;
+    eventHandlers: EventHandlers;
+}
 
-    const onMouseEnter = useCallback(() => setIsHovered(true), []);
-    const onMouseLeave = useCallback(() => setIsHovered(false), []);
+export const useHover = (): UseHover => {
+    const [isHovered, setIsHovered] = useState<boolean>(false);
+
+    const onMouseEnter = useCallback(() => {
+        setIsHovered(true);
+    }, []);
+
+    const onMouseLeave = useCallback(() => {
+        setIsHovered(false);
+    }, []);
 
     return {
         isHovered,
