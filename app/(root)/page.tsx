@@ -1,4 +1,4 @@
-import ToolTipWrapper from '@/app/components/molecules/ToolTipWrapper';
+import ToolTipWrapper from '@/app/components/base/molecules/ToolTipWrapper';
 
 const Root = () => {
   const ToolTipContent: React.ReactNode = (

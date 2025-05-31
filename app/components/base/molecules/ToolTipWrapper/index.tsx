@@ -1,6 +1,6 @@
 'use client';
 
-import Tooltip from '@/app/components/atoms/ToolTip';
+import Tooltip from '@/app/components/base/atoms/ToolTip';
 import { useTooltip } from '@/app/hooks/useToolTip';
 
 type Props = {
