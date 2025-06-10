@@ -2,517 +2,564 @@
 
 import {
     DndContext,
-    DragEndEvent,
     DragOverlay,
-    DragStartEvent,
-    KeyboardSensor,
     PointerSensor,
     pointerWithin,
     useDraggable,
     useDroppable,
     useSensor,
-    useSensors
+    useSensors,
 } from '@dnd-kit/core';
-import { ChevronDown, ChevronRight, Folder, FolderOpen } from 'lucide-react';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { Virtuoso } from 'react-virtuoso';
 
-// Types
-interface FolderNode {
+// ------------------ 型・ユーティリティ（変更なし） -------------------
+
+type FolderNode = {
     id: string;
     name: string;
     parentId: string | null;
-    children?: FolderNode[];
     isExpanded?: boolean;
-    isLoading?: boolean;
-    level?: number;
-}
-
-interface FlattenedNode extends FolderNode {
-    level: number;
-    visible: boolean;
-}
-
-// Mock API
-const mockFetchChildren = async (parentId: string): Promise<FolderNode[]> => {
-    await new Promise(resolve => setTimeout(resolve, 500));
-    return Array.from({ length: Math.floor(Math.random() * 5) + 2 }, (_, i) => ({
-        id: `${parentId}-${i}`,
-        name: `Folder ${parentId}-${i}`,
-        parentId,
-    }));
+    children?: FolderNode[];
 };
+type FolderFlatNode = FolderNode & { level: number; type: 'folder' };
 
-const DropArea: React.FC<{ id: string; height?: number }> = ({ id, height = 2 }) => {
+type BookNode = {
+    id: string;
+    title: string;
+    author: string;
+    parentId: string | null;
+    isExpanded?: boolean;
+    children?: BookNode[];
+};
+type BookFlatNode = BookNode & { level: number; type: 'book' };
+
+type FlatNode = FolderFlatNode | BookFlatNode;
+type DropZoneType = 'before' | 'after' | 'folder';
+
+type DropAreaId = string; // drop:type:zone:nodeId
+
+function parseDropAreaId(id: DropAreaId): { type: 'folder' | 'book'; zone: DropZoneType; nodeId: string } | null {
+    const m = id.match(/^drop:(folder|book):(before|after|folder):(.+)$/);
+    if (!m) return null;
+    return { type: m[1] as any, zone: m[2] as any, nodeId: m[3] };
+}
+
+// Folder系 (変更なし)
+function flattenFolderTree(nodes: FolderNode[], level = 0): FolderFlatNode[] {
+    let result: FolderFlatNode[] = [];
+    for (const n of nodes) {
+        result.push({ ...n, level, type: 'folder' });
+        if (n.isExpanded && n.children) {
+            result = result.concat(flattenFolderTree(n.children, level + 1));
+        }
+    }
+    return result;
+}
+function toggleFolderNode(nodes: FolderNode[], id: string): FolderNode[] {
+    return nodes.map(n =>
+        n.id === id
+            ? { ...n, isExpanded: !n.isExpanded }
+            : n.children
+                ? { ...n, children: toggleFolderNode(n.children, id) }
+                : n
+    );
+}
+function isDescendantFolder(flat: FolderFlatNode[], dragId: string, targetId: string): boolean {
+    if (dragId === targetId) return true;
+    const node = flat.find(n => n.id === targetId);
+    if (!node) return false;
+    let cur = node;
+    while (cur?.parentId) {
+        if (cur.parentId === dragId) return true;
+        cur = flat.find(n => n.id === cur.parentId)!;
+    }
+    return false;
+}
+function removeFolderNode(nodes: FolderNode[], id: string): [FolderNode[], FolderNode | null] {
+    let removed: FolderNode | null = null;
+    const filtered = nodes
+        .map(node => {
+            if (node.id === id) {
+                removed = node;
+                return null;
+            }
+            if (node.children) {
+                const [children, childRemoved] = removeFolderNode(node.children, id);
+                if (childRemoved) removed = childRemoved;
+                return { ...node, children };
+            }
+            return node;
+        })
+        .filter(Boolean) as FolderNode[];
+    return [filtered, removed];
+}
+function insertFolderNode(
+    nodes: FolderNode[],
+    nodeToInsert: FolderNode,
+    targetParentId: string | null,
+    insertIndex: number | null = null
+): FolderNode[] {
+    if (targetParentId === null) {
+        const arr = [...nodes];
+        arr.splice(insertIndex ?? arr.length, 0, { ...nodeToInsert, parentId: null });
+        return arr;
+    }
+    return nodes.map(n => {
+        if (n.id === targetParentId) {
+            const children = n.children ? [...n.children] : [];
+            const idx = insertIndex ?? children.length;
+            children.splice(idx, 0, { ...nodeToInsert, parentId: n.id });
+            return { ...n, isExpanded: true, children };
+        }
+        if (n.children) {
+            return { ...n, children: insertFolderNode(n.children, nodeToInsert, targetParentId, insertIndex) };
+        }
+        return n;
+    });
+}
+
+// Book系 (変更なし)
+function flattenBookTree(nodes: BookNode[], level = 0): BookFlatNode[] {
+    let result: BookFlatNode[] = [];
+    for (const n of nodes) {
+        result.push({ ...n, level, type: 'book' });
+        if (n.isExpanded && n.children) {
+            result = result.concat(flattenBookTree(n.children, level + 1));
+        }
+    }
+    return result;
+}
+function toggleBookNode(nodes: BookNode[], id: string): BookNode[] {
+    return nodes.map(n =>
+        n.id === id
+            ? { ...n, isExpanded: !n.isExpanded }
+            : n.children
+                ? { ...n, children: toggleBookNode(n.children, id) }
+                : n
+    );
+}
+function isDescendantBook(flat: BookFlatNode[], dragId: string, targetId: string): boolean {
+    if (dragId === targetId) return true;
+    const node = flat.find(n => n.id === targetId);
+    if (!node) return false;
+    let cur = node;
+    while (cur?.parentId) {
+        if (cur.parentId === dragId) return true;
+        cur = flat.find(n => n.id === cur.parentId)!;
+    }
+    return false;
+}
+function removeBookNode(nodes: BookNode[], id: string): [BookNode[], BookNode | null] {
+    let removed: BookNode | null = null;
+    const filtered = nodes
+        .map(node => {
+            if (node.id === id) {
+                removed = node;
+                return null;
+            }
+            if (node.children) {
+                const [children, childRemoved] = removeBookNode(node.children, id);
+                if (childRemoved) removed = childRemoved;
+                return { ...node, children };
+            }
+            return node;
+        })
+        .filter(Boolean) as BookNode[];
+    return [filtered, removed];
+}
+function insertBookNode(
+    nodes: BookNode[],
+    nodeToInsert: BookNode,
+    targetParentId: string | null,
+    insertIndex: number | null = null
+): BookNode[] {
+    if (targetParentId === null) {
+        const arr = [...nodes];
+        arr.splice(insertIndex ?? arr.length, 0, { ...nodeToInsert, parentId: null });
+        return arr;
+    }
+    return nodes.map(n => {
+        if (n.id === targetParentId) {
+            const children = n.children ? [...n.children] : [];
+            const idx = insertIndex ?? children.length;
+            children.splice(idx, 0, { ...nodeToInsert, parentId: n.id });
+            return { ...n, isExpanded: true, children };
+        }
+        if (n.children) {
+            return { ...n, children: insertBookNode(n.children, nodeToInsert, targetParentId, insertIndex) };
+        }
+        return n;
+    });
+}
+
+// ------------------- UI部品 (変更なし) ----------------------
+
+const DropArea: React.FC<{ id: DropAreaId; height?: number; level?: number }> = ({ id, height = 4, level = 0 }) => {
     const { isOver, setNodeRef } = useDroppable({ id });
+    const marginLeft = level * 20;
     return (
         <div
             ref={setNodeRef}
             style={{
                 height,
-                background: isOver ? '#60a5fa' : undefined,
+                background: isOver ? '#48c9b0' : 'transparent',
+                borderRadius: 4,
                 transition: 'background 0.15s',
-                margin: '0 0 2px 0',
-                borderRadius: 3,
+                marginLeft
             }}
         />
     );
 };
 
-const DraggableFolder: React.FC<{
-    node: FlattenedNode;
-    isSelected: boolean;
+const FolderRow: React.FC<{
+    node: FolderFlatNode;
+    selected: boolean;
+    isDragging?: boolean;
     onToggle: (id: string) => void;
     onSelect: (id: string) => void;
-    isDragging?: boolean;
-}> = ({ node, isSelected, onToggle, onSelect, isDragging }) => {
-    const { attributes, listeners, setNodeRef: setDragNodeRef, isDragging: dragging } = useDraggable({ id: node.id });
-    const { isOver, setNodeRef: setDropNodeRef } = useDroppable({ id: `drop:folder:${node.id}` });
+}> = ({ node, selected, isDragging, onToggle, onSelect }) => {
+    const { attributes, listeners, setNodeRef: setDraggableNodeRef, isDragging: dragging } = useDraggable({ id: node.id });
+    const { isOver, setNodeRef: setDroppableNodeRef } = useDroppable({
+        id: `drop:folder:folder:${node.id}`,
+    });
 
-    // ドラッグ＆ドロップ用refを合成
-    const combinedRef = (nodeEl: HTMLDivElement | null) => {
-        setDragNodeRef(nodeEl);
-        setDropNodeRef(nodeEl);
-    };
-
-    const handleRowClick = (e: React.MouseEvent) => {
-        e.stopPropagation();
-        onSelect(node.id);
-    };
-
-    const handlePointerDown = (e: React.PointerEvent) => {
-        if (listeners?.onPointerDown) listeners.onPointerDown(e);
-    };
-
-    const handleToggleClick = (e: React.MouseEvent) => {
-        e.stopPropagation();
-        onToggle(node.id);
-    };
+    const setNodeRef = useCallback((element: HTMLElement | null) => {
+        setDraggableNodeRef(element);
+        setDroppableNodeRef(element);
+    }, [setDraggableNodeRef, setDroppableNodeRef]);
 
     return (
         <div
-            ref={combinedRef}
+            ref={setNodeRef}
             {...attributes}
             {...listeners}
             style={{
-                opacity: isDragging || dragging ? 0.5 : 1,
-                outline: isSelected ? '2px solid #2563eb' : undefined,
-                background: isOver
-                    ? "#a5d8ff" // ← ドロップ中ハイライト追加
-                    : isSelected
-                        ? "#dbeafe"
-                        : undefined,
+                display: 'flex',
+                alignItems: 'center',
                 marginLeft: node.level * 20,
+                background: isOver ? '#b7e4c7' : isDragging || dragging ? '#aed6f1' : selected ? '#d6eaf8' : undefined,
+                cursor: 'pointer',
+                padding: '4px 8px',
                 borderRadius: 6,
-                transition: 'background 0.15s'
+                opacity: isDragging || dragging ? 0.6 : 1,
+                transition: 'background-color 0.2s',
             }}
-            className={
-                "flex items-center py-2 px-2 cursor-pointer transition-colors " +
-                (isSelected ? "bg-blue-100 hover:bg-blue-200 ring-2 ring-blue-400 ring-inset" : "hover:bg-gray-100")
-            }
-            onClick={handleRowClick}
-            onPointerDown={handlePointerDown}
-            role="treeitem"
-            aria-selected={isSelected}
-            aria-expanded={node.isExpanded}
-            aria-level={node.level + 1}
-            tabIndex={isSelected ? 0 : -1}
+            onClick={() => onSelect(node.id)}
+            tabIndex={0}
+            aria-selected={selected}
         >
-            <button
-                type="button"
-                onClick={handleToggleClick}
-                className="mr-1 p-1 hover:bg-gray-300 rounded transition-colors"
-                tabIndex={-1}
-                aria-label={node.isExpanded ? "折りたたむ" : "展開する"}
+            <span
+                style={{ marginRight: 6, width: 18, textAlign: 'center', cursor: 'pointer' }}
+                onClick={e => {
+                    e.stopPropagation();
+                    onToggle(node.id);
+                }}
             >
-                {node.isLoading ? (
-                    <div className="w-4 h-4 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin" />
-                ) : node.children !== undefined || node.isExpanded ? (
-                    node.isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />
-                ) : (
-                    <div className="w-4 h-4" />
-                )}
-            </button>
-            {node.isExpanded ? <FolderOpen size={16} className="mr-2" /> : <Folder size={16} className="mr-2" />}
-            <span className="select-none">{node.name}</span>
+                {node.children && node.children.length > 0 ? (node.isExpanded ? '▼' : '▶') : ''}
+            </span>
+            <span role="img" aria-label="Folder" style={{ marginRight: 6 }}>
+                📁
+            </span>
+            {node.name}
         </div>
     );
 };
 
-// DragOverlayContent
-const DragOverlayContent: React.FC<{ node: FlattenedNode; flattenedNodes: FlattenedNode[] }> = ({ node, flattenedNodes }) => {
-    const MAX_COUNT = 20; // 上限ノード数
+const BookRow: React.FC<{
+    node: BookFlatNode;
+    selected: boolean;
+    isDragging?: boolean;
+    onToggle: (id: string) => void;
+    onSelect: (id: string) => void;
+}> = ({ node, selected, isDragging, onToggle, onSelect }) => {
+    const { attributes, listeners, setNodeRef: setDraggableNodeRef, isDragging: dragging } = useDraggable({ id: node.id });
 
-    // 再帰的に展開中子孫もすべてリストアップ
-    const collectExpanded = (nodeId: string, baseLevel: number, acc: FlattenedNode[] = []): FlattenedNode[] => {
-        if (acc.length >= MAX_COUNT) return acc;
-        const currentNode = flattenedNodes.find(n => n.id === nodeId);
-        if (!currentNode) return acc;
+    const isDroppable = node.children !== undefined;
+    const { isOver, setNodeRef: setDroppableNodeRef } = useDroppable({
+        id: `drop:book:folder:${node.id}`,
+        disabled: !isDroppable,
+    });
 
-        acc.push(currentNode);
-        if (
-            currentNode.isExpanded &&
-            currentNode.children &&
-            currentNode.children.length > 0 &&
-            acc.length < MAX_COUNT
-        ) {
-            for (const child of currentNode.children) {
-                if (acc.length >= MAX_COUNT) break;
-                collectExpanded(child.id, baseLevel, acc);
-            }
-        }
-        return acc;
-    };
-
-    const draggedNodes = collectExpanded(node.id, node.level);
-    const baseLevel = node.level;
-
-    return (
-        <div className="bg-white shadow-lg rounded border border-gray-300 p-2 opacity-90 min-w-[180px]">
-            {draggedNodes.map((n) => (
-                <div
-                    key={n.id}
-                    className="flex items-center py-1"
-                    style={{ marginLeft: `${(n.level - baseLevel) * 20}px` }}
-                >
-                    {n.isExpanded ? <FolderOpen size={16} className="mr-2" /> : <Folder size={16} className="mr-2" />}
-                    <span>{n.name}</span>
-                </div>
-            ))}
-            {draggedNodes.length >= MAX_COUNT && (
-                <div className="text-xs text-gray-400 italic mt-1">…さらに省略されています</div>
-            )}
-        </div>
-    );
-};
-
-function generateFolders(count: number, parentId: string): FolderNode[] {
-    return Array.from({ length: count }, (_, i) => ({
-        id: `${parentId}-auto-${i + 1}`,
-        name: `AutoFolder-${i + 1}`,
-        parentId: parentId,
-    }));
-}
-
-// Main Component
-const VirtualTree: React.FC = () => {
-    const [folders, setFolders] = useState<FolderNode[]>([
-        { id: 'root-1', name: 'Documents', parentId: null, children: generateFolders(5, 'root-1') },
-        { id: 'root-2', name: 'Pictures', parentId: null, children: generateFolders(5, 'root-2') },
-        { id: 'root-3', name: 'Music', parentId: null, children: generateFolders(5, 'root-3') },
-        { id: 'root-4', name: 'Ex', parentId: null, children: generateFolders(10000, 'root-4') },
-    ]);
-    const [selectedId, setSelectedId] = useState<string | null>('root-1');
-    const [activeId, setActiveId] = useState<string | null>(null);
-    const containerRef = useRef<HTMLDivElement>(null);
-    const virtuosoRef = useRef<any>(null);
-
-    const sensors = useSensors(
-        useSensor(PointerSensor, {
-            activationConstraint: {
-                distance: 5,
-            },
-        }),
-        useSensor(KeyboardSensor, {
-            keyboardCodes: {
-                start: [],
-                cancel: ['Escape'],
-                end: [],
-            },
-        })
-    );
-
-    const flattenTree = useCallback((nodes: FolderNode[], level = 0): FlattenedNode[] => {
-        const result: FlattenedNode[] = [];
-        for (const node of nodes) {
-            result.push({
-                ...node,
-                level,
-                visible: true,
-            });
-            if (node.isExpanded && node.children) {
-                result.push(...flattenTree(node.children, level + 1));
-            }
-        }
-        return result;
-    }, []);
-    const flattenedNodes = useMemo(() => flattenTree(folders), [folders, flattenTree]);
-
-    // 遅延ロード
-    const loadChildren = async (nodeId: string) => {
-        const updateNode = (nodes: FolderNode[]): FolderNode[] =>
-            nodes.map(node =>
-                node.id === nodeId
-                    ? { ...node, isLoading: true }
-                    : node.children
-                        ? { ...node, children: updateNode(node.children) }
-                        : node
-            );
-        setFolders(updateNode(folders));
-        const children = await mockFetchChildren(nodeId);
-        setFolders(prevFolders => {
-            const update = (nodes: FolderNode[]): FolderNode[] =>
-                nodes.map(node =>
-                    node.id === nodeId
-                        ? { ...node, children, isLoading: false, isExpanded: true }
-                        : node.children
-                            ? { ...node, children: update(node.children) }
-                            : node
-                );
-            return update(prevFolders);
-        });
-    };
-
-    const toggleFolder = async (nodeId: string) => {
-        const node = flattenedNodes.find(n => n.id === nodeId);
-        if (!node) return;
-        if (!node.children && !node.isLoading) {
-            await loadChildren(nodeId);
-        } else if (!node.isLoading) {
-            setFolders(prevFolders => {
-                const update = (nodes: FolderNode[]): FolderNode[] =>
-                    nodes.map(n =>
-                        n.id === nodeId
-                            ? { ...n, isExpanded: !n.isExpanded }
-                            : n.children
-                                ? { ...n, children: update(n.children) }
-                                : n
-                    );
-                return update(prevFolders);
-            });
-        }
-    };
-
-    // DnD Logic
-    const handleDragStart = (event: DragStartEvent) => setActiveId(event.active.id as string);
-
-    const handleDragEnd = (event: DragEndEvent) => {
-        setActiveId(null);
-        const { active, over } = event;
-        if (!over || !active) return;
-        const overId = String(over.id);
-        const activeNode = flattenedNodes.find(n => n.id === String(active.id));
-        if (!activeNode) return;
-        const match = overId.match(/^drop:(folder|before|after):(.+)$/);
-        if (!match) return;
-        const [, zone, targetId] = match;
-
-        // 自分自身や子孫へのドロップを禁止
-        if (isDescendant(activeNode.id, targetId)) return;
-
-        if (zone === 'folder') {
-            setFolders(prev => {
-                const [removedTree, removedNode] = removeNode(prev, activeNode.id);
-                if (!removedNode) return prev;
-                return insertNode(removedTree, removedNode, targetId);
-            });
-        } else if (zone === 'before' || zone === 'after') {
-            const refNode = flattenedNodes.find(n => n.id === targetId);
-            if (!refNode) return;
-            const parentId = refNode.parentId;
-            const siblings = flattenedNodes.filter(n => n.parentId === parentId);
-            let insertIndex = siblings.findIndex(n => n.id === targetId);
-            if (zone === 'after') insertIndex += 1;
-            setFolders(prev => {
-                const [removedTree, removedNode] = removeNode(prev, activeNode.id);
-                if (!removedNode) return prev;
-                if (parentId === null) {
-                    const result = [...removedTree];
-                    if (insertIndex > result.length) insertIndex = result.length;
-                    result.splice(insertIndex, 0, { ...removedNode, parentId: null });
-                    return result;
-                }
-                return insertNode(removedTree, removedNode, parentId, insertIndex);
-            });
-        }
-    };
-
-    function isDescendant(dragId: string, targetId: string): boolean {
-        if (dragId === targetId) return true;
-        const node = flattenedNodes.find(n => n.id === targetId);
-        if (!node) return false;
-        let current = node;
-        while (current?.parentId) {
-            if (current.parentId === dragId) return true;
-            current = flattenedNodes.find(n => n.id === current.parentId)!;
-        }
-        return false;
-    }
-
-    const removeNode = (nodes: FolderNode[], id: string): [FolderNode[], FolderNode | null] => {
-        let removed: FolderNode | null = null;
-        const filtered = nodes
-            .map(node => {
-                if (node.id === id) {
-                    removed = node;
-                    return null;
-                }
-                if (node.children) {
-                    const [newChildren, childRemoved] = removeNode(node.children, id);
-                    if (childRemoved) removed = childRemoved;
-                    return { ...node, children: newChildren };
-                }
-                return node;
-            })
-            .filter(Boolean) as FolderNode[];
-        return [filtered, removed];
-    };
-
-    const insertNode = (
-        nodes: FolderNode[],
-        nodeToInsert: FolderNode,
-        targetParentId: string | null,
-        insertIndex: number | null = null
-    ): FolderNode[] => {
-        return nodes.map(node => {
-            if (node.id === targetParentId) {
-                let newChildren = node.children ? [...node.children] : [];
-                if (insertIndex === null || insertIndex > newChildren.length) {
-                    newChildren.push({ ...nodeToInsert, parentId: node.id });
-                } else {
-                    newChildren.splice(insertIndex, 0, { ...nodeToInsert, parentId: node.id });
-                }
-                return { ...node, isExpanded: true, children: newChildren };
-            }
-            if (node.children) {
-                return { ...node, children: insertNode(node.children, nodeToInsert, targetParentId, insertIndex) };
-            }
-            return node;
-        });
-    };
-
-    // キーボード操作
-    const handleKeyDown = useCallback((e: KeyboardEvent) => {
-        if (!selectedId || activeId) return;
-        const currentIndex = flattenedNodes.findIndex(n => n.id === selectedId);
-        if (currentIndex === -1) return;
-        const currentNode = flattenedNodes[currentIndex];
-        let handled = false;
-
-        switch (e.key) {
-            case 'ArrowUp':
-                e.preventDefault();
-                if (currentIndex > 0) {
-                    setSelectedId(flattenedNodes[currentIndex - 1].id);
-                    virtuosoRef.current?.scrollToIndex({ index: currentIndex - 1, align: 'center' });
-                    handled = true;
-                }
-                break;
-
-            case 'ArrowDown':
-                e.preventDefault();
-                if (currentIndex < flattenedNodes.length - 1) {
-                    setSelectedId(flattenedNodes[currentIndex + 1].id);
-                    virtuosoRef.current?.scrollToIndex({ index: currentIndex + 1, align: 'center' });
-                    handled = true;
-                }
-                break;
-
-            case 'ArrowRight':
-                e.preventDefault();
-                if (!currentNode.isExpanded && (currentNode.children || !currentNode.isLoading)) {
-                    toggleFolder(currentNode.id);
-                    handled = true;
-                } else if (currentNode.isExpanded && currentNode.children && currentNode.children.length > 0) {
-                    const childIndex = flattenedNodes.findIndex(n => n.parentId === currentNode.id);
-                    if (childIndex !== -1) {
-                        setSelectedId(flattenedNodes[childIndex].id);
-                        virtuosoRef.current?.scrollToIndex({ index: childIndex, align: 'center' });
-                        handled = true;
-                    }
-                }
-                break;
-
-            case 'ArrowLeft':
-                e.preventDefault();
-                if (currentNode.isExpanded) {
-                    toggleFolder(currentNode.id);
-                    handled = true;
-                } else if (currentNode.parentId) {
-                    const parentIndex = flattenedNodes.findIndex(n => n.id === currentNode.parentId);
-                    if (parentIndex !== -1) {
-                        setSelectedId(currentNode.parentId);
-                        virtuosoRef.current?.scrollToIndex({ index: parentIndex, align: 'center' });
-                        handled = true;
-                    }
-                }
-                break;
-
-            case 'Enter':
-            case ' ':
-                e.preventDefault();
-                toggleFolder(currentNode.id);
-                handled = true;
-                break;
-        }
-
-        if (handled) {
-            setTimeout(() => {
-                const selectedElement = containerRef.current?.querySelector('[aria-selected="true"]');
-                if (selectedElement instanceof HTMLElement) {
-                    selectedElement.focus();
-                }
-            }, 0);
-        }
-    }, [selectedId, flattenedNodes, activeId]);
-
-    useEffect(() => {
-        window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [handleKeyDown]);
-
-    const activeNode = activeId ? flattenedNodes.find(n => n.id === activeId) : null;
+    const setNodeRef = useCallback((element: HTMLElement | null) => {
+        setDraggableNodeRef(element);
+        setDroppableNodeRef(element);
+    }, [setDraggableNodeRef, setDroppableNodeRef]);
 
     return (
         <div
-            ref={containerRef}
-            className="w-full h-full outline-none bg-white border border-gray-200 rounded-lg"
-            role="tree"
-            aria-label="フォルダツリー"
+            ref={setNodeRef}
+            {...attributes}
+            {...listeners}
+            style={{
+                display: 'flex',
+                alignItems: 'center',
+                marginLeft: node.level * 20,
+                background: isDroppable && isOver ? '#fff2c6' : isDragging || dragging ? '#fae5a7' : selected ? '#fcf3cf' : undefined,
+                cursor: 'pointer',
+                padding: '4px 8px',
+                borderRadius: 6,
+                opacity: isDragging || dragging ? 0.6 : 1,
+                transition: 'background-color 0.2s',
+            }}
+            onClick={() => onSelect(node.id)}
+            tabIndex={0}
+            aria-selected={selected}
         >
-            <div className="p-4 border-b border-gray-200">
-                <p className="text-xs text-gray-500 mt-1">
-                    選択中: {selectedId || 'なし'}
-                </p>
+            <span
+                style={{ marginRight: 6, width: 18, textAlign: 'center', cursor: 'pointer' }}
+                onClick={e => {
+                    e.stopPropagation();
+                    onToggle(node.id);
+                }}
+            >
+                {node.children && node.children.length > 0 ? (node.isExpanded ? '▼' : '▶') : ''}
+            </span>
+            <span role="img" aria-label="Book" style={{ marginRight: 6 }}>
+                📚
+            </span>
+            <span>
+                <strong>{node.title}</strong>
+                <span style={{ fontSize: 12, color: '#666', marginLeft: 8 }}>
+                    by {node.author}
+                </span>
+            </span>
+        </div>
+    );
+};
+
+const DragOverlayContent: React.FC<{ node: FlatNode }> = ({ node }) => {
+    if (node.type === 'folder') {
+        return (
+            <div style={{
+                background: '#aed6f1',
+                padding: '4px 16px',
+                borderRadius: 6,
+                fontWeight: 'bold',
+                display: 'flex',
+                alignItems: 'center'
+            }}>
+                📁 {node.name}
             </div>
+        );
+    }
+    if (node.type === 'book') {
+        return (
+            <div style={{
+                background: '#fae5a7',
+                padding: '4px 16px',
+                borderRadius: 6,
+                fontWeight: 'bold',
+                display: 'flex',
+                alignItems: 'center'
+            }}>
+                📚 {node.title}
+                <span style={{ fontSize: 12, color: '#666', marginLeft: 8 }}>by {node.author}</span>
+            </div>
+        );
+    }
+    return null;
+};
+
+// --------------------- メイン (ここから変更) -----------------------
+
+const VirtualMultiTree: React.FC = () => {
+    // State (変更なし)
+    const [folderRoots, setFolderRoots] = useState<FolderNode[]>([
+        {
+            id: 'folder-1',
+            name: 'Documents',
+            parentId: null,
+            isExpanded: true,
+            children: [
+                { id: 'folder-1-1', name: 'Projects', parentId: 'folder-1', children: [] },
+                { id: 'folder-1-2', name: 'Personal', parentId: 'folder-1', children: [] },
+            ],
+        },
+        {
+            id: 'folder-2',
+            name: 'Pictures',
+            parentId: null,
+            isExpanded: false,
+            children: [],
+        },
+    ]);
+    const [bookRoots, setBookRoots] = useState<BookNode[]>([
+        {
+            id: 'book-root-1',
+            title: 'Programming',
+            author: '',
+            parentId: null,
+            isExpanded: true,
+            children: [
+                { id: 'book-1', title: 'React Handbook', author: 'Kent C. Dodds', parentId: 'book-root-1' },
+                { id: 'book-2', title: 'Effective TypeScript', author: 'Dan Vanderkam', parentId: 'book-root-1' },
+            ],
+        },
+        {
+            id: 'book-root-2',
+            title: 'Novels',
+            author: '',
+            parentId: null,
+            isExpanded: false,
+            children: [
+                { id: 'book-3', title: 'Norwegian Wood', author: 'Haruki Murakami', parentId: 'book-root-2' },
+            ],
+        },
+    ]);
+    const [selectedId, setSelectedId] = useState<string | null>(null);
+    const [activeId, setActiveId] = useState<string | null>(null);
+
+    const flattenedNodes = useMemo<FlatNode[]>(() => [
+        ...flattenFolderTree(folderRoots),
+        ...flattenBookTree(bookRoots),
+    ], [folderRoots, bookRoots]);
+
+    const sensors = useSensors(
+        useSensor(PointerSensor, { activationConstraint: { distance: 4 } })
+    );
+
+    const findNode = (id: string) => flattenedNodes.find(n => n.id === id);
+
+    // handleDragEnd ロジック (変更なし)
+    const handleDragEnd = ({ active, over }: any) => {
+        setActiveId(null);
+        if (!over) return;
+        const dropInfo = parseDropAreaId(String(over.id));
+        const src = findNode(String(active.id));
+        if (!dropInfo || !src || src.type !== dropInfo.type) return;
+
+        if (src.type === 'folder') {
+            const flat = flattenedNodes.filter(n => n.type === 'folder') as FolderFlatNode[];
+            if (isDescendantFolder(flat, src.id, dropInfo.nodeId)) return;
+            setFolderRoots(prev => {
+                const [removed, node] = removeFolderNode(prev, src.id);
+                if (!node) return prev;
+                if (dropInfo.zone === 'folder') {
+                    return insertFolderNode(removed, node, dropInfo.nodeId, null);
+                } else {
+                    const target = flat.find(n => n.id === dropInfo.nodeId);
+                    const parentChildren = target?.parentId
+                        ? flat.find(f => f.id === target.parentId)?.children ?? []
+                        : folderRoots;
+                    const siblings = parentChildren.map(c => flat.find(f => f.id === c.id)!);
+                    let idx = siblings.findIndex(n => n.id === target?.id);
+
+                    if (dropInfo.zone === 'after') idx += 1;
+                    return insertFolderNode(
+                        removed,
+                        node,
+                        target?.parentId ?? null,
+                        idx
+                    );
+                }
+            });
+        }
+        if (src.type === 'book') {
+            const flat = flattenedNodes.filter(n => n.type === 'book') as BookFlatNode[];
+            if (isDescendantBook(flat, src.id, dropInfo.nodeId)) return;
+            setBookRoots(prev => {
+                const [removed, node] = removeBookNode(prev, src.id);
+                if (!node) return prev;
+                if (dropInfo.zone === 'folder') {
+                    return insertBookNode(removed, node, dropInfo.nodeId, null);
+                }
+                else {
+                    const target = flat.find(n => n.id === dropInfo.nodeId);
+                    const parentChildren = target?.parentId
+                        ? flat.find(f => f.id === target.parentId)?.children ?? []
+                        : bookRoots;
+                    const siblings = parentChildren.map(c => flat.find(f => f.id === c.id)!);
+                    let idx = siblings.findIndex(n => n.id === target?.id);
+                    if (dropInfo.zone === 'after')
+                        idx += 1;
+                    return insertBookNode(
+                        removed,
+                        node,
+                        target?.parentId ?? null,
+                        idx
+                    );
+                }
+            });
+        }
+    };
+
+    const handleToggle = useCallback(
+        (id: string) => {
+            const node = findNode(id);
+            if (!node) return;
+            if (node.type === 'folder') setFolderRoots(f => toggleFolderNode(f, id));
+            else if (node.type === 'book') setBookRoots(b => toggleBookNode(b, id));
+        }, [flattenedNodes]
+    );
+    const handleSelect = (id: string) => setSelectedId(id);
+    const handleDragStart = ({ active }: any) => setActiveId(String(active.id));
+
+    const renderItem = (index: number) => {
+        const node = flattenedNodes[index];
+
+        if (node.type === 'folder') {
+            return (
+                <React.Fragment key={node.id}>
+                    <DropArea id={`drop:folder:before:${node.id}`} height={4} level={node.level} />
+                    <FolderRow
+                        node={node}
+                        selected={selectedId === node.id}
+                        isDragging={activeId === node.id}
+                        onToggle={handleToggle}
+                        onSelect={handleSelect}
+                    />
+                    <DropArea id={`drop:folder:after:${node.id}`} height={4} level={node.level} />
+                </React.Fragment>
+            );
+        }
+
+        if (node.type === 'book') {
+            return (
+                <React.Fragment key={node.id}>
+                    <DropArea id={`drop:book:before:${node.id}`} height={4} level={node.level} />
+                    <BookRow
+                        node={node}
+                        selected={selectedId === node.id}
+                        isDragging={activeId === node.id}
+                        onToggle={handleToggle}
+                        onSelect={handleSelect}
+                    />
+                    <DropArea id={`drop:book:after:${node.id}`} height={4} level={node.level} />
+                </React.Fragment>
+            );
+        }
+
+        return null;
+    };
+
+    const activeNode = activeId ? findNode(activeId) : null;
+
+    return (
+        <div style={{ border: '1px solid #bbb', borderRadius: 8, width: 430, margin: '30px auto', background: '#fafcff', boxShadow: '0 2px 10px #eee' }}>
+            <div style={{ padding: 12, fontWeight: 'bold', fontSize: 16 }}>共通ツリービュー（Book/Folder D&D, フォルダ直接ドロップ対応）</div>
             <DndContext
                 sensors={sensors}
                 collisionDetection={pointerWithin}
                 onDragStart={handleDragStart}
                 onDragEnd={handleDragEnd}
             >
-                <Virtuoso
-                    ref={virtuosoRef}
-                    style={{ height: '500px', width: '500px' }}
-                    totalCount={flattenedNodes.length}
-                    itemContent={(index) => {
-                        const node = flattenedNodes[index];
-                        return (
-                            <>
-                                {/* 上ドロップゾーン */}
-                                <DropArea id={`drop:before:${node.id}`} />
-                                <DraggableFolder
-                                    key={node.id}
-                                    node={node}
-                                    isSelected={selectedId === node.id}
-                                    onToggle={toggleFolder}
-                                    onSelect={setSelectedId}
-                                    isDragging={activeId === node.id}
-                                />
-                                {/* 下ドロップゾーン */}
-                                <DropArea id={`drop:after:${node.id}`} />
-                            </>
-                        );
-                    }}
-                />
+                <div style={{ height: 440, borderTop: '1px solid #eee' }}>
+                    <Virtuoso
+                        style={{ height: 440 }}
+                        totalCount={flattenedNodes.length}
+                        itemContent={renderItem}
+                    />
+                </div>
                 <DragOverlay>
-                    {activeId && activeNode ? (
-                        <DragOverlayContent node={activeNode} flattenedNodes={flattenedNodes} />
-                    ) : null}
+                    {activeNode && <DragOverlayContent node={activeNode} />}
                 </DragOverlay>
             </DndContext>
+            <div style={{ padding: 8, borderTop: '1px solid #eee', fontSize: 14, color: '#444' }}>
+                選択中: {selectedId ?? 'なし'}
+            </div>
         </div>
     );
 };
 
-export default VirtualTree;
+export default VirtualMultiTree;
