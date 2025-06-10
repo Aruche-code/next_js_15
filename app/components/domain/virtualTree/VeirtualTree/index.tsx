@@ -10,10 +10,10 @@ import {
     useSensor,
     useSensors,
 } from '@dnd-kit/core';
-import React, { useCallback, useMemo, useState } from 'react';
-import { Virtuoso } from 'react-virtuoso';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 
-// ------------------ 型・ユーティリティ（変更なし） -------------------
+// ------------------ 型・ユーティリティ -------------------
 
 type FolderNode = {
     id: string;
@@ -45,7 +45,7 @@ function parseDropAreaId(id: DropAreaId): { type: 'folder' | 'book'; zone: DropZ
     return { type: m[1] as any, zone: m[2] as any, nodeId: m[3] };
 }
 
-// Folder系 (変更なし)
+// Folder系
 function flattenFolderTree(nodes: FolderNode[], level = 0): FolderFlatNode[] {
     let result: FolderFlatNode[] = [];
     for (const n of nodes) {
@@ -119,7 +119,7 @@ function insertFolderNode(
     });
 }
 
-// Book系 (変更なし)
+// Book系
 function flattenBookTree(nodes: BookNode[], level = 0): BookFlatNode[] {
     let result: BookFlatNode[] = [];
     for (const n of nodes) {
@@ -364,7 +364,16 @@ const DragOverlayContent: React.FC<{ node: FlatNode }> = ({ node }) => {
 // --------------------- メイン (ここから変更) -----------------------
 
 const VirtualMultiTree: React.FC = () => {
-    // State (変更なし)
+
+    function generateFolders(count: number, parentId: string): FolderNode[] {
+        return Array.from({ length: count }, (_, i) => ({
+            id: `${parentId}-auto-${i + 1}`,
+            name: `AutoFolder-${i + 1}`,
+            parentId: parentId,
+        }));
+    }
+
+    // State
     const [folderRoots, setFolderRoots] = useState<FolderNode[]>([
         {
             id: 'folder-1',
@@ -381,7 +390,7 @@ const VirtualMultiTree: React.FC = () => {
             name: 'Pictures',
             parentId: null,
             isExpanded: false,
-            children: [],
+            children: [...generateFolders(100000, 'folder-2')],
         },
     ]);
     const [bookRoots, setBookRoots] = useState<BookNode[]>([
@@ -410,6 +419,10 @@ const VirtualMultiTree: React.FC = () => {
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [activeId, setActiveId] = useState<string | null>(null);
 
+
+    const virtuosoRef = useRef<VirtuosoHandle>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
+
     const flattenedNodes = useMemo<FlatNode[]>(() => [
         ...flattenFolderTree(folderRoots),
         ...flattenBookTree(bookRoots),
@@ -421,7 +434,7 @@ const VirtualMultiTree: React.FC = () => {
 
     const findNode = (id: string) => flattenedNodes.find(n => n.id === id);
 
-    // handleDragEnd ロジック (変更なし)
+    // handleDragEnd ロジック
     const handleDragEnd = ({ active, over }: any) => {
         setActiveId(null);
         if (!over) return;
@@ -492,8 +505,96 @@ const VirtualMultiTree: React.FC = () => {
             else if (node.type === 'book') setBookRoots(b => toggleBookNode(b, id));
         }, [flattenedNodes]
     );
+
     const handleSelect = (id: string) => setSelectedId(id);
     const handleDragStart = ({ active }: any) => setActiveId(String(active.id));
+
+    // キーボード操作ハンドラ
+    const handleKeyDown = useCallback((e: KeyboardEvent) => {
+        if (!selectedId || activeId) return;
+        const currentIndex = flattenedNodes.findIndex(n => n.id === selectedId);
+        if (currentIndex === -1) return;
+        const currentNode = flattenedNodes[currentIndex];
+        let handled = false;
+
+        switch (e.key) {
+            case 'ArrowUp':
+                e.preventDefault();
+                if (currentIndex > 0) {
+                    const newIndex = currentIndex - 1;
+                    setSelectedId(flattenedNodes[newIndex].id);
+                    virtuosoRef.current?.scrollToIndex({ index: newIndex, align: 'center' });
+                    handled = true;
+                }
+                break;
+
+            case 'ArrowDown':
+                e.preventDefault();
+                if (currentIndex < flattenedNodes.length - 1) {
+                    const newIndex = currentIndex + 1;
+                    setSelectedId(flattenedNodes[newIndex].id);
+                    virtuosoRef.current?.scrollToIndex({ index: newIndex, align: 'center' });
+                    handled = true;
+                }
+                break;
+
+            case 'ArrowRight':
+                e.preventDefault();
+                if (!currentNode.isExpanded && currentNode.children && currentNode.children.length > 0) {
+                    handleToggle(currentNode.id);
+                    handled = true;
+                } else if (currentNode.isExpanded && currentNode.children && currentNode.children.length > 0) {
+                    const newIndex = currentIndex + 1;
+                    if (newIndex < flattenedNodes.length) {
+                        setSelectedId(flattenedNodes[newIndex].id);
+                        virtuosoRef.current?.scrollToIndex({ index: newIndex, align: 'center' });
+                        handled = true;
+                    }
+                }
+                break;
+
+            case 'ArrowLeft':
+                e.preventDefault();
+                if (currentNode.isExpanded) {
+                    handleToggle(currentNode.id);
+                    handled = true;
+                } else if (currentNode.parentId) {
+                    const parentIndex = flattenedNodes.findIndex(n => n.id === currentNode.parentId);
+                    if (parentIndex !== -1) {
+                        setSelectedId(currentNode.parentId);
+                        virtuosoRef.current?.scrollToIndex({ index: parentIndex, align: 'center' });
+                        handled = true;
+                    }
+                }
+                break;
+
+            case 'Enter':
+            case ' ':
+                e.preventDefault();
+                if (currentNode.children && currentNode.children.length > 0) {
+                    handleToggle(currentNode.id);
+                    handled = true;
+                }
+                break;
+        }
+
+        if (handled) {
+            setTimeout(() => {
+                const selectedElement = containerRef.current?.querySelector<HTMLElement>('[aria-selected="true"]');
+                selectedElement?.focus();
+            }, 0);
+        }
+    }, [selectedId, flattenedNodes, activeId, handleToggle]);
+
+    // keydownイベントリスナーを登録
+    useEffect(() => {
+        const container = containerRef.current;
+        if (container) {
+            container.addEventListener('keydown', handleKeyDown);
+            return () => container.removeEventListener('keydown', handleKeyDown);
+        }
+    }, [handleKeyDown]);
+
 
     const renderItem = (index: number) => {
         const node = flattenedNodes[index];
@@ -536,8 +637,7 @@ const VirtualMultiTree: React.FC = () => {
     const activeNode = activeId ? findNode(activeId) : null;
 
     return (
-        <div style={{ border: '1px solid #bbb', borderRadius: 8, width: 430, margin: '30px auto', background: '#fafcff', boxShadow: '0 2px 10px #eee' }}>
-            <div style={{ padding: 12, fontWeight: 'bold', fontSize: 16 }}>共通ツリービュー（Book/Folder D&D, フォルダ直接ドロップ対応）</div>
+        <div ref={containerRef} style={{ border: '1px solid #bbb', borderRadius: 8, width: 430, margin: '30px auto', background: '#fafcff', boxShadow: '0 2px 10px #eee' }}>
             <DndContext
                 sensors={sensors}
                 collisionDetection={pointerWithin}
@@ -546,6 +646,7 @@ const VirtualMultiTree: React.FC = () => {
             >
                 <div style={{ height: 440, borderTop: '1px solid #eee' }}>
                     <Virtuoso
+                        ref={virtuosoRef}
                         style={{ height: 440 }}
                         totalCount={flattenedNodes.length}
                         itemContent={renderItem}
